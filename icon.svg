@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8B5CF6"/>
+      <stop offset="0.55" stop-color="#5B3DF5"/>
+      <stop offset="1" stop-color="#1E9BFF"/>
+    </linearGradient>
+    <linearGradient id="shine" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.22"/>
+      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="cup" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#E4E1FF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- macOS-Grundform mit Rand -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#shine)"/>
+
+  <!-- Schatten -->
+  <ellipse cx="512" cy="800" rx="300" ry="34" fill="#140A4A" opacity="0.28"/>
+
+  <!-- Kopfbügel -->
+  <path d="M 300 520 A 212 212 0 0 1 724 520" fill="none" stroke="#FFFFFF" stroke-width="58" stroke-linecap="round"/>
+  <path d="M 300 520 A 212 212 0 0 1 724 520" fill="none" stroke="#C9C2FF" stroke-width="14" stroke-linecap="round" opacity="0.55"/>
+
+  <!-- Mikrofonarm -->
+  <path d="M 262 720 Q 270 830 400 815" fill="none" stroke="#FFFFFF" stroke-width="24" stroke-linecap="round"/>
+  <circle cx="414" cy="813" r="26" fill="#FFFFFF"/>
+  <circle cx="414" cy="813" r="12" fill="#5B3DF5"/>
+
+  <!-- Ohrmuscheln -->
+  <rect x="200" y="470" width="200" height="300" rx="90" fill="url(#cup)"/>
+  <rect x="624" y="470" width="200" height="300" rx="90" fill="url(#cup)"/>
+
+  <!-- ChatMix-Rad rechts -->
+  <rect x="812" y="560" width="26" height="90" rx="13" fill="#FFFFFF"/>
+  <line x1="818" y1="578" x2="832" y2="578" stroke="#8B5CF6" stroke-width="5" stroke-linecap="round"/>
+  <line x1="818" y1="596" x2="832" y2="596" stroke="#8B5CF6" stroke-width="5" stroke-linecap="round"/>
+  <line x1="818" y1="614" x2="832" y2="614" stroke="#8B5CF6" stroke-width="5" stroke-linecap="round"/>
+  <line x1="818" y1="632" x2="832" y2="632" stroke="#8B5CF6" stroke-width="5" stroke-linecap="round"/>
+
+  <!-- Controller (Game) -->
+  <g transform="translate(300 620) scale(0.82)">
+    <path d="M -62 -28 Q -78 -28 -84 -6 L -96 36 Q -100 58 -80 60 Q -66 61 -52 40 L -40 24 L 40 24 L 52 40 Q 66 61 80 60 Q 100 58 96 36 L 84 -6 Q 78 -28 62 -28 Z" fill="#6D4BF6"/>
+    <rect x="-58" y="-6" width="34" height="11" rx="4" fill="#FFFFFF"/>
+    <rect x="-46" y="-18" width="11" height="34" rx="4" fill="#FFFFFF"/>
+    <circle cx="42" cy="-8" r="8" fill="#FFFFFF"/>
+    <circle cx="58" cy="8" r="8" fill="#FFFFFF"/>
+  </g>
+
+  <!-- Sprechblase (Chat) -->
+  <g transform="translate(724 612) scale(0.88)">
+    <path d="M -64 -44 H 64 Q 86 -44 86 -22 V 22 Q 86 44 64 44 H -18 L -50 72 L -44 44 H -64 Q -86 44 -86 22 V -22 Q -86 -44 -64 -44 Z" fill="#1E9BFF"/>
+    <circle cx="-34" cy="0" r="10" fill="#FFFFFF"/>
+    <circle cx="0" cy="0" r="10" fill="#FFFFFF"/>
+    <circle cx="34" cy="0" r="10" fill="#FFFFFF"/>
+  </g>
+</svg>
