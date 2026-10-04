@@ -13,6 +13,8 @@ The ChatMix dial on the Arctis Nova 7 Gen 2 only works on Windows, because it re
 ## Features
 
 - Reads the ChatMix dial position directly via USB HID, no SteelSeries software needed
+- Shows the headset battery level and charging state in the menu and settings
+- Battery tab: history chart, estimated runtime and charge time, charge-limit notification (optionally runs a Shortcut, e.g. to switch off a smart plug), low-battery warning, detection of charging that stalls below 100 %, and capacity estimation in mAh with a USB-C power meter
 - Per-app routing with three channels: **Game**, **Chat** or **Normal** (untouched by the dial)
 - Automatic game detection: Steam library, CrossOver / Whisky / Wine, GeForce NOW and the macOS app category "Games"
 - Separate defaults for games, other apps (browser, music …) and system sounds – by default everything except chat follows "Game"
@@ -27,7 +29,7 @@ The ChatMix dial on the Arctis Nova 7 Gen 2 only works on Windows, because it re
 |---|---|
 | macOS | **14.2 (Sonoma) or later**. Process taps were introduced in 14.2. Tested on macOS 26 (Tahoe). |
 | Mac | Apple silicon or Intel |
-| Headset | Arctis Nova 7 Wireless **Gen 2** with the USB-C dongle (USB ID `1038:227e`) |
+| Headset | Arctis Nova 7 Wireless **Gen 2** with the **USB-C dongle** (USB ID `1038:227e`). Over Bluetooth the headset is an audio device only and sends no dial or battery data, so the dongle is required. |
 | Tools | Apple Command Line Tools (free, requested automatically if missing) |
 
 Other Nova models are not supported yet, because they may use a different USB ID or report format. Contributions welcome, see [Protocol](#protocol).
@@ -56,6 +58,7 @@ bash install.sh
 - **Settings** (menu bar icon › *Einstellungen …* or ⌘,):
   - **Allgemein (General):** status, live bars for dial position and signal levels, volume curve, percentages in the menu bar, launch at login
   - **Kanäle (Channels):** defaults for games, other apps and system sounds, plus a **Game | Chat | Normal** switch for every app. Installed games are listed automatically; other apps appear when they play audio, or add them with *App hinzufügen …*. A separate switch covers iPhone calls and FaceTime audio. Right-click an app to reset it to the default.
+  - **Akku (Battery):** live level, history chart (24 h / 7 days / 30 days), estimated runtime and time to full, charge limit with notification and optional Shortcut, low-battery warning, list of charging sessions. Enter the mAh shown by a USB-C power meter for a session (at least 20 % charged) and ChatMix estimates the full capacity, allowing ~15 % charging losses.
   - **Info:** version and project notes
 - **No sound at all?** Choose *ChatMix beenden* (quit) in the menu. Audio returns to normal immediately.
 
@@ -79,6 +82,17 @@ The headset sends the dial position unprompted on vendor interface `usage page 0
 
 In the centre position both values are 100. Polling (as done by HeadsetControl for older models) times out on the Gen 2.
 
+**Battery and status.** Send output report `b0` to the command interface (`usage page 0xffc0`, interface 3). The answer arrives there:
+
+| Byte | Meaning |
+|---|---|
+| 0 | `0xb0` |
+| 1 | `0x03` = headset on and connected |
+| 2 | Battery in % |
+| 3 | `0x01` = charging |
+
+Changes are also reported unprompted on interface 5: `b7 <battery %>`, `bb <01 = charging>`, `b9 <03 = headset on>`. Thanks to the Linux kernel `hid-steelseries` work for documenting this.
+
 ## Troubleshooting
 
 | Problem | Solution |
@@ -101,6 +115,10 @@ bash uninstall.sh
 
 Quits ChatMix, removes the app, its settings and the audio permission.
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
@@ -121,7 +139,7 @@ Das ChatMix-Rad des Arctis Nova 7 Gen 2 funktioniert nur unter Windows, weil es 
 
 - **macOS 14.2 (Sonoma) oder neuer**, getestet mit macOS 26 (Tahoe)
 - Apple-Silicon- oder Intel-Mac
-- Arctis Nova 7 Wireless **Gen 2** mit USB-C-Dongle
+- Arctis Nova 7 Wireless **Gen 2** mit **USB-C-Dongle**. Über Bluetooth meldet sich das Headset nur als Audiogerät und sendet weder Radstellung noch Akkustand – der Dongle ist daher nötig.
 - Apple Command Line Tools (kostenlos, werden bei Bedarf automatisch angefragt)
 
 ## Installation
@@ -148,6 +166,7 @@ bash install.sh
 - **Einstellungen** (Menüleisten-Symbol › *Einstellungen …* oder ⌘,):
   - **Allgemein:** Status, Live-Balken für Radstellung und Signal, Lautstärkeverlauf, Prozentwerte in der Menüleiste, Start bei der Anmeldung
   - **Kanäle:** Standardregeln für Spiele, andere Apps und Systemklänge sowie ein Umschalter **Game | Chat | Normal** für jede App. „Normal“ heißt: Das Rad wirkt nicht darauf. Installierte Spiele (Steam, CrossOver/Whisky, Kategorie „Games“) werden automatisch erkannt; andere Apps erscheinen, sobald sie Ton abspielen, oder über *App hinzufügen …*. Ein eigener Schalter regelt Anrufe vom iPhone und FaceTime-Audio. Rechtsklick setzt eine App auf den Standard zurück.
+  - **Akku:** aktueller Stand, Verlaufsdiagramm (24 Std. / 7 Tage / 30 Tage), geschätzte Laufzeit und Ladedauer, Ladegrenze mit Mitteilung und optionalem Kurzbefehl (z. B. HomeKit-Steckdose aus), Warnung bei 15 %, Liste der Ladevorgänge. Trägst du die mAh eines USB-C-Messgeräts bei einem Ladevorgang ein (mind. 20 % geladen), schätzt ChatMix die volle Kapazität (inkl. ca. 15 % Ladeverlust).
   - **Info:** Version und Hinweise
 - **Gar kein Ton mehr?** Im Menü *ChatMix beenden* wählen. Der Ton ist sofort wieder normal.
 

@@ -44,5 +44,9 @@ Claude-Session: https://claude.ai/code/session_011jbLCHy37H4Au8Ju3AGWxB"
 gh repo create "$REPO" --public --description "$DESC" --source=. --remote=origin --push
 gh repo edit "$LOGIN/$REPO" --add-topic macos,swift,steelseries,arctis-nova-7,chatmix,menubar-app,core-audio
 
+# 5. Release mit Änderungsprotokoll anlegen
+VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" Info.plist)
+gh release create "v$VERSION" --title "ChatMix $VERSION" --notes-file CHANGELOG.md
+
 echo ""
 echo "Fertig: https://github.com/$LOGIN/$REPO"

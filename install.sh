@@ -30,7 +30,7 @@ echo "▶︎ Baue ChatMix ..."
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Info.plist "$APP/Contents/Info.plist"
 cp AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
-swiftc -O -swift-version 5 -parse-as-library ChatMix.swift -o "$APP/Contents/MacOS/ChatMix"
+swiftc -O -swift-version 5 -parse-as-library -target "$(uname -m)-apple-macos14.2" ChatMix.swift -o "$APP/Contents/MacOS/ChatMix"
 codesign --force --sign - "$APP" >/dev/null 2>&1
 
 # 3. Laufende Version beenden

@@ -10,6 +10,8 @@ import os
 import SwiftUI
 import ServiceManagement
 import UniformTypeIdentifiers
+import UserNotifications
+import Charts
 
 // MARK: - Core-Audio-Helfer
 
@@ -510,27 +512,49 @@ final class Router {
 // MARK: - ChatMix-Rad per HID
 
 final class DialReader {
+    struct Status {
+        var headsetOn: Bool? = nil     // nil = unbekannt
+        var battery: Int? = nil        // 0…100 %
+        var charging = false
+    }
+
     var onValues: ((Int, Int) -> Void)?
     var onConnectionChange: ((Bool) -> Void)?
+    var onStatus: ((Status) -> Void)?
+    private(set) var status = Status()
+    /// Schnittstelle für Statusabfragen (Usage Page 0xffc0, Interface 3)
+    private var commandDevices: [IOHIDDevice] = []
+    private var pollTimer: Timer?
     private(set) var connected = 0
+    /// Verbindungsweg des Headsets, z. B. "USB" oder "Bluetooth"
+    private(set) var transports: [String] = []
     private let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
 
     func start() {
-        let matching: [String: Any] = [
+        // Erkennung über Produkt-ID (USB-Dongle) oder Produktname (z. B. Bluetooth mit anderer ID)
+        let byID: [String: Any] = [
             kIOHIDVendorIDKey: 0x1038,
             kIOHIDProductIDKey: 0x227e,
             kIOHIDPrimaryUsagePageKey: 0xff00
         ]
-        IOHIDManagerSetDeviceMatching(manager, matching as CFDictionary)
+        let byName: [String: Any] = [
+            kIOHIDVendorIDKey: 0x1038,
+            kIOHIDProductKey: "Arctis Nova 7 Gen 2",
+            kIOHIDPrimaryUsagePageKey: 0xff00
+        ]
+        // Befehls-Schnittstelle nur am Dongle: Das per USB-C-Kabel angeschlossene Headset (0x227c)
+        // hat zwar auch eine, beantwortet aber keine Statusabfragen.
+        var cmdByID = byID; cmdByID[kIOHIDPrimaryUsagePageKey] = 0xffc0
+        IOHIDManagerSetDeviceMatchingMultiple(manager, [byID, byName, cmdByID] as CFArray)
         let ctx = Unmanaged.passUnretained(self).toOpaque()
 
-        IOHIDManagerRegisterDeviceMatchingCallback(manager, { ctx, _, _, _ in
+        IOHIDManagerRegisterDeviceMatchingCallback(manager, { ctx, _, _, device in
             guard let ctx else { return }
-            Unmanaged<DialReader>.fromOpaque(ctx).takeUnretainedValue().changed(+1)
+            Unmanaged<DialReader>.fromOpaque(ctx).takeUnretainedValue().changed(+1, device)
         }, ctx)
-        IOHIDManagerRegisterDeviceRemovalCallback(manager, { ctx, _, _, _ in
+        IOHIDManagerRegisterDeviceRemovalCallback(manager, { ctx, _, _, device in
             guard let ctx else { return }
-            Unmanaged<DialReader>.fromOpaque(ctx).takeUnretainedValue().changed(-1)
+            Unmanaged<DialReader>.fromOpaque(ctx).takeUnretainedValue().changed(-1, device)
         }, ctx)
         IOHIDManagerRegisterInputReportCallback(manager, { ctx, _, _, _, reportID, report, length in
             guard let ctx else { return }
@@ -540,15 +564,77 @@ final class DialReader {
 
         IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
         IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
+
+        // Akkustand alle 60 s nachfragen (Änderungen meldet das Headset zusätzlich von selbst)
+        pollTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            self?.requestStatus()
+        }
     }
 
-    private func changed(_ delta: Int) {
+    /// Statusabfrage 0xb0 an die Befehls-Schnittstelle; Antwort: b0 <verbunden> <akku> <laden>
+    func requestStatus() {
+        var buf = [UInt8](repeating: 0, count: 63)
+        buf[0] = 0xb0
+        for dev in commandDevices {
+            IOHIDDeviceSetReport(dev, kIOHIDReportTypeOutput, 0, buf, buf.count)
+        }
+    }
+
+    private func usagePage(_ device: IOHIDDevice) -> Int {
+        (IOHIDDeviceGetProperty(device, kIOHIDPrimaryUsagePageKey as CFString) as? Int) ?? 0
+    }
+
+    private func changed(_ delta: Int, _ device: IOHIDDevice) {
+        if usagePage(device) == 0xffc0 {
+            if delta > 0 {
+                commandDevices.append(device)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.requestStatus() }
+            } else {
+                commandDevices.removeAll { $0 === device }
+                if commandDevices.isEmpty {
+                    status = Status()
+                    onStatus?(status)
+                } else {
+                    requestStatus()
+                }
+            }
+            return
+        }
+        let transport = (IOHIDDeviceGetProperty(device, kIOHIDTransportKey as CFString) as? String) ?? "?"
+        if delta > 0 {
+            transports.append(transport)
+        } else if let i = transports.firstIndex(of: transport) {
+            transports.remove(at: i)
+        }
         let was = connected > 0
         connected = max(0, connected + delta)
-        if was != (connected > 0) { onConnectionChange?(connected > 0) }
+        if was != (connected > 0) || delta != 0 { onConnectionChange?(connected > 0) }
     }
 
     private func handle(reportID: UInt32, report: UnsafeMutablePointer<UInt8>, length: Int) {
+        if length >= 2 {
+            var s = status
+            switch report[0] {
+            case 0xb0 where length >= 4:            // Antwort auf Statusabfrage
+                s.headsetOn = report[1] == 0x03
+                s.battery = s.headsetOn == true ? min(Int(report[2]), 100) : nil
+                s.charging = report[3] == 0x01
+            case 0xb7:                               // neuer Akkustand
+                s.battery = min(Int(report[1]), 100)
+            case 0xb9:                               // Headset ein/aus
+                s.headsetOn = report[1] == 0x03
+                if s.headsetOn == false { s.battery = nil }
+                else { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.requestStatus() } }
+            case 0xbb:                               // Laden ja/nein
+                s.charging = report[1] == 0x01
+            default:
+                break
+            }
+            if s.headsetOn != status.headsetOn || s.battery != status.battery || s.charging != status.charging {
+                status = s
+                onStatus?(s)
+            }
+        }
         var game = -1, chat = -1
         if length >= 3 && report[0] == 0x45 {
             game = Int(report[1]); chat = Int(report[2])
@@ -640,8 +726,22 @@ final class AppModel: ObservableObject {
 
     let router = Router()
     let dial = DialReader()
+    let batteryTracker = BatteryTracker()
+    private var batteryTimer: Timer?
 
     @Published var connected = false { didSet { updateIcon() } }
+    /// z. B. "USB-Dongle", "Bluetooth" oder "USB-Dongle + Bluetooth"
+    @Published var connectionType = ""
+    @Published var headsetOn: Bool?
+    @Published var battery: Int?
+    @Published var charging = false
+
+    /// Kurzer Text für Akku/Zustand, z. B. "Akku 48 % ⚡" oder "Headset aus"
+    var batteryText: String? {
+        if headsetOn == false { return "Headset aus" }
+        guard let b = battery else { return nil }
+        return "Akku \(b) %" + (charging ? " ⚡" : "")
+    }
     @Published var game = 100 { didSet { updateIcon() } }
     @Published var chat = 100 { didSet { updateIcon() } }
     @Published var errorText: String?
@@ -698,7 +798,7 @@ final class AppModel: ObservableObject {
 
     // Klassifizierung
 
-    private func override(for info: AudioProcInfo) -> Channel? {
+    private func channelOverride(for info: AudioProcInfo) -> Channel? {
         var best: (len: Int, ch: Channel)?
         for (key, ch) in overrides where info.bundleID.hasPrefix(key) || info.appBundleID.hasPrefix(key) {
             if best == nil || key.count > best!.len { best = (key.count, ch) }
@@ -713,7 +813,7 @@ final class AppModel: ObservableObject {
     }
 
     func channel(for info: AudioProcInfo) -> Channel {
-        override(for: info) ?? defaultChannel(isGame: info.isGame, isSystem: info.isSystem)
+        channelOverride(for: info) ?? defaultChannel(isGame: info.isGame, isSystem: info.isSystem)
     }
 
     private func saveRules() {
@@ -736,7 +836,9 @@ final class AppModel: ObservableObject {
         }
         dial.onConnectionChange = { [weak self] isConnected in
             guard let self else { return }
-            self.connected = isConnected
+            let names = Set(self.dial.transports.map { $0.lowercased().contains("bluetooth") ? "Bluetooth" : "USB-Dongle" })
+            self.connectionType = names.sorted(by: >).joined(separator: " + ")
+            if self.connected != isConnected { self.connected = isConnected }
             if isConnected {
                 self.router.activate()
             } else {
@@ -745,6 +847,18 @@ final class AppModel: ObservableObject {
                 self.chat = 100
                 self.applyGains()
             }
+        }
+        dial.onStatus = { [weak self] st in
+            guard let self else { return }
+            self.headsetOn = st.headsetOn
+            self.battery = st.battery
+            self.charging = st.charging
+            self.batteryTracker.record(pct: st.battery, charging: st.charging, headsetOn: st.headsetOn)
+        }
+        // einmal pro Minute aufzeichnen, damit der Verlauf auch ohne Änderung dicht bleibt
+        batteryTimer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
+            guard let self, self.connected else { return }
+            self.batteryTracker.record(pct: self.battery, charging: self.charging, headsetOn: self.headsetOn)
         }
         dial.start()
         timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in self?.tick() }
@@ -879,6 +993,400 @@ final class AppModel: ObservableObject {
     }
 }
 
+// MARK: - Akku-Tracker (Verlauf, Schätzungen, Ladegrenze, Kapazität)
+
+struct BatterySample: Codable {
+    let t: Date
+    let pct: Int
+    let charging: Bool
+}
+
+struct ChargeSession: Codable, Identifiable {
+    var id = UUID()
+    let start: Date
+    let startPct: Int
+    var end: Date?
+    var endPct: Int
+    /// Zuletzt gemeldeter Prozentwert und wann er sich zuletzt geändert hat (zum Erkennen eines Ladestopps)
+    var lastChange: Date
+    /// Mit einem USB-C-Messgerät gemessene Ladung in mAh (vom Nutzer eingetragen)
+    var measuredMAh: Double?
+
+    var deltaPct: Int { endPct - startPct }
+
+    /// Hochgerechnete Akkukapazität: gemessene mAh × Ladewirkungsgrad ÷ geladener Anteil
+    var capacityEstimate: Double? {
+        guard let mah = measuredMAh, mah > 0, deltaPct >= 20 else { return nil }
+        return mah * BatteryTracker.chargeEfficiency / (Double(deltaPct) / 100)
+    }
+}
+
+final class BatteryTracker: ObservableObject {
+    /// Typischer Wirkungsgrad beim Laden kleiner Li-Ionen-Akkus (Verluste in Ladeelektronik und Wärme)
+    static let chargeEfficiency = 0.85
+
+    @Published private(set) var samples: [BatterySample] = []
+    @Published private(set) var sessions: [ChargeSession] = []
+
+    @Published var limitEnabled: Bool { didSet { UserDefaults.standard.set(limitEnabled, forKey: "limitEnabled"); askForNotifications() } }
+    @Published var limit: Int { didSet { UserDefaults.standard.set(limit, forKey: "chargeLimit") } }
+    @Published var shortcutName: String { didSet { UserDefaults.standard.set(shortcutName, forKey: "limitShortcut") } }
+    @Published var lowWarning: Bool { didSet { UserDefaults.standard.set(lowWarning, forKey: "lowWarning"); askForNotifications() } }
+
+    private var lastCharging: Bool?
+    private var notifiedLimit = false
+    private var notifiedLow = false
+    private let fileURL: URL
+
+    init() {
+        let d = UserDefaults.standard
+        limitEnabled = (d.object(forKey: "limitEnabled") as? Bool) ?? false
+        limit = (d.object(forKey: "chargeLimit") as? Int) ?? 80
+        shortcutName = d.string(forKey: "limitShortcut") ?? ""
+        lowWarning = (d.object(forKey: "lowWarning") as? Bool) ?? true
+
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("ChatMix", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        fileURL = dir.appendingPathComponent("battery.json")
+        load()
+        askForNotifications()
+    }
+
+    // Speichern / Laden
+
+    private struct Store: Codable {
+        var samples: [BatterySample]
+        var sessions: [ChargeSession]
+    }
+
+    private func load() {
+        guard let data = try? Data(contentsOf: fileURL),
+              let store = try? JSONDecoder().decode(Store.self, from: data) else { return }
+        samples = store.samples
+        sessions = store.sessions
+    }
+
+    private func save() {
+        let cutoff = Date().addingTimeInterval(-90 * 24 * 3600)      // 90 Tage aufheben
+        samples.removeAll { $0.t < cutoff }
+        if sessions.count > 200 { sessions.removeFirst(sessions.count - 200) }
+        if let data = try? JSONEncoder().encode(Store(samples: samples, sessions: sessions)) {
+            try? data.write(to: fileURL, options: .atomic)
+        }
+    }
+
+    // Aufzeichnen (bei jeder Statusänderung und einmal pro Minute)
+
+    func record(pct: Int?, charging: Bool, headsetOn: Bool?) {
+        guard let pct, headsetOn != false else {
+            lastCharging = nil
+            return
+        }
+        let now = Date()
+        var changed = false
+
+        // Verlaufspunkt: bei Änderung, sonst spätestens alle 10 Minuten
+        if let last = samples.last, last.pct == pct, last.charging == charging,
+           now.timeIntervalSince(last.t) < 600 {
+        } else {
+            samples.append(BatterySample(t: now, pct: pct, charging: charging))
+            changed = true
+        }
+
+        // Ladevorgänge
+        if charging && lastCharging != true {
+            sessions.append(ChargeSession(start: now, startPct: pct, endPct: pct, lastChange: now))
+            notifiedLimit = false
+            changed = true
+        } else if charging, let i = sessions.indices.last, sessions[i].end == nil {
+            if sessions[i].endPct != pct {
+                sessions[i].endPct = pct
+                sessions[i].lastChange = now
+                changed = true
+            }
+        } else if !charging && lastCharging == true, let i = sessions.indices.last, sessions[i].end == nil {
+            sessions[i].end = now
+            sessions[i].endPct = pct
+            changed = true
+        }
+        lastCharging = charging
+
+        // Ladegrenze
+        if limitEnabled && charging && pct >= limit && !notifiedLimit {
+            notifiedLimit = true
+            notify("Ladegrenze erreicht", "Headset-Akku bei \(pct) % – Ladekabel abziehen.")
+            runShortcut()
+        }
+        // Akku fast leer
+        if lowWarning && !charging && pct <= 15 && !notifiedLow {
+            notifiedLow = true
+            notify("Headset-Akku fast leer", "Nur noch \(pct) % – bald aufladen.")
+        }
+        if pct >= 20 || charging { notifiedLow = false }
+
+        if changed { save() }
+    }
+
+    func setMeasuredMAh(_ value: Double?, for id: UUID) {
+        guard let i = sessions.firstIndex(where: { $0.id == id }) else { return }
+        sessions[i].measuredMAh = value
+        save()
+    }
+
+    func clearHistory() {
+        samples = []
+        sessions = []
+        save()
+    }
+
+    // Auswertung
+
+    /// Verbrauch in %/h, aus Abschnitten ohne Laden mit dichtem Messabstand (Headset war an)
+    var dischargeRate: Double? {
+        rate(charging: false, window: 14 * 24 * 3600, maxGap: 1800, perSeconds: 3600)
+    }
+
+    /// Ladegeschwindigkeit in %/min
+    var chargeRate: Double? {
+        rate(charging: true, window: 30 * 24 * 3600, maxGap: 1800, perSeconds: 60)
+    }
+
+    private func rate(charging: Bool, window: TimeInterval, maxGap: TimeInterval, perSeconds: Double) -> Double? {
+        let cutoff = Date().addingTimeInterval(-window)
+        let recent = samples.filter { $0.t >= cutoff }
+        guard recent.count > 1 else { return nil }
+        var pct = 0.0, secs = 0.0
+        for k in 1..<recent.count {
+            let a = recent[k - 1], b = recent[k]
+            let dt = b.t.timeIntervalSince(a.t)
+            guard a.charging == charging, b.charging == charging, dt > 0, dt <= maxGap else { continue }
+            let dp = Double(charging ? b.pct - a.pct : a.pct - b.pct)
+            guard dp >= 0 else { continue }
+            pct += dp
+            secs += dt
+        }
+        guard pct >= 5, secs > 0 else { return nil }      // zu wenig Daten
+        return pct / secs * perSeconds
+    }
+
+    /// Geschätzte Laufzeit mit voller Ladung in Stunden
+    var fullRuntimeHours: Double? { dischargeRate.map { 100 / $0 } }
+
+    /// Laufender Ladevorgang, der seit mindestens 30 Minuten nicht mehr gestiegen ist (unter 100 %)
+    var stalledSession: ChargeSession? {
+        guard let s = sessions.last, s.end == nil, s.endPct < 100,
+              Date().timeIntervalSince(s.lastChange) > 1800 else { return nil }
+        return s
+    }
+
+    /// Mittelwert aller Kapazitätsschätzungen
+    var averageCapacity: Double? {
+        let values = sessions.compactMap(\.capacityEstimate)
+        guard !values.isEmpty else { return nil }
+        return values.reduce(0, +) / Double(values.count)
+    }
+
+    // Mitteilungen und Kurzbefehl
+
+    private func askForNotifications() {
+        guard limitEnabled || lowWarning else { return }
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    private func notify(_ title: String, _ body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    private func runShortcut() {
+        let name = shortcutName.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/shortcuts")
+        p.arguments = ["run", name]
+        try? p.run()
+    }
+}
+
+// MARK: - Einstellungen: Akku
+
+struct BatterySettings: View {
+    @ObservedObject var model: AppModel
+    @ObservedObject var tracker: BatteryTracker
+    @State private var range: TimeInterval = 24 * 3600
+
+    private func hours(_ h: Double) -> String {
+        h >= 10 ? "\(Int(h.rounded())) h" : String(format: "%.1f h", h)
+    }
+
+    var body: some View {
+        Form {
+            Section("Jetzt") {
+                if let b = model.battery, model.connected, model.headsetOn != false {
+                    LevelRow(title: model.charging ? "Akku (lädt)" : "Akku",
+                             symbol: model.charging ? "battery.100.bolt" : "battery.75",
+                             value: Double(b) / 100, tint: b > 20 ? .green : .red)
+                    if model.charging {
+                        if let r = tracker.chargeRate, r > 0 {
+                            let target = tracker.limitEnabled ? max(tracker.limit, b) : 100
+                            let minutes = Double(target - b) / r
+                            LabeledContent(target < 100 ? "\(target) % erreicht in" : "Voll in",
+                                           value: minutes < 1 ? "gleich" : "ca. \(Int(minutes.rounded())) Min.")
+                        } else {
+                            LabeledContent("Ladezeit", value: "wird ermittelt …")
+                        }
+                    } else if let rate = tracker.dischargeRate {
+                        LabeledContent("Restlaufzeit", value: "ca. \(hours(Double(b) / rate))")
+                    }
+                } else {
+                    Text(model.connected ? "Headset ist ausgeschaltet." : "Headset nicht verbunden (Dongle nötig).")
+                        .foregroundStyle(.secondary)
+                }
+                if let s = tracker.stalledSession {
+                    Label("Lädt seit über 30 Min. nicht weiter – das Headset hält den Akku offenbar bei \(s.endPct) %.",
+                          systemImage: "pause.circle")
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            Section {
+                Picker("Zeitraum", selection: $range) {
+                    Text("24 Std.").tag(TimeInterval(24 * 3600))
+                    Text("7 Tage").tag(TimeInterval(7 * 24 * 3600))
+                    Text("30 Tage").tag(TimeInterval(30 * 24 * 3600))
+                }
+                .pickerStyle(.segmented)
+                let from = Date().addingTimeInterval(-range)
+                let points = tracker.samples.filter { $0.t >= from }
+                if points.count < 2 {
+                    Text("Noch zu wenig Messwerte. Der Verlauf füllt sich, solange ChatMix läuft und das Headset über den Dongle verbunden ist.")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Chart(points, id: \.t) { p in
+                        LineMark(x: .value("Zeit", p.t), y: .value("Akku", p.pct))
+                            .interpolationMethod(.stepEnd)
+                            .foregroundStyle(.green)
+                        if p.charging {
+                            PointMark(x: .value("Zeit", p.t), y: .value("Akku", p.pct))
+                                .symbolSize(12)
+                                .foregroundStyle(.yellow)
+                        }
+                    }
+                    .chartYScale(domain: 0...100)
+                    .chartXScale(domain: from...Date())
+                    .chartYAxis { AxisMarks(values: [0, 25, 50, 75, 100]) { _ in AxisGridLine(); AxisValueLabel() } }
+                    .frame(height: 170)
+                }
+            } header: {
+                Text("Verlauf")
+            } footer: {
+                Text("Gelbe Punkte = Laden.").font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Laufzeit") {
+                if let h = tracker.fullRuntimeHours, let r = tracker.dischargeRate {
+                    LabeledContent("Mit voller Ladung", value: "ca. \(hours(h))")
+                    LabeledContent("Verbrauch", value: String(format: "%.1f %% pro Stunde", r))
+                    // Herstellerangabe Arctis Nova 7 Gen 2: bis zu 54 h über 2,4 GHz
+                    LabeledContent("Im Vergleich zur Herstellerangabe") {
+                        Text("\(Int((h / 54 * 100).rounded())) % von 54 h")
+                            .foregroundStyle(h / 54 >= 0.7 ? Color.primary : Color.orange)
+                    }
+                } else {
+                    Text("Wird berechnet, sobald genug Messwerte ohne Laden vorliegen (mind. 5 % Verbrauch).")
+                        .foregroundStyle(.secondary)
+                }
+                if let r = tracker.chargeRate {
+                    LabeledContent("Ladegeschwindigkeit", value: String(format: "%.1f %% pro Minute", r))
+                }
+            }
+
+            Section {
+                Toggle("Bei Ladegrenze benachrichtigen", isOn: $tracker.limitEnabled)
+                if tracker.limitEnabled {
+                    Stepper("Ladegrenze: \(tracker.limit) %", value: $tracker.limit, in: 50...100, step: 5)
+                    TextField("Kurzbefehl ausführen (optional)", text: $tracker.shortcutName,
+                              prompt: Text("z. B. Ladesteckdose aus"))
+                }
+                Toggle("Warnung bei 15 % Akku", isOn: $tracker.lowWarning)
+            } header: {
+                Text("Ladegrenze")
+            } footer: {
+                Text("Das Headset entscheidet selbst, wie weit es lädt – ChatMix kann das Laden nicht stoppen. Bei Erreichen der Grenze erscheint eine Mitteilung. Lädst du über eine HomeKit-Steckdose, kann ein Kurzbefehl (App „Kurzbefehle“) sie automatisch ausschalten.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section {
+                let recent = Array(tracker.sessions.suffix(10).reversed())
+                if recent.isEmpty {
+                    Text("Noch keine Ladevorgänge aufgezeichnet.").foregroundStyle(.secondary)
+                }
+                ForEach(recent) { s in
+                    SessionRow(session: s, tracker: tracker)
+                }
+                if let cap = tracker.averageCapacity {
+                    LabeledContent("Geschätzte Kapazität", value: "≈ \(Int(cap.rounded())) mAh")
+                        .bold()
+                }
+            } header: {
+                Text("Ladevorgänge & Kapazität")
+            } footer: {
+                Text("Kapazität messen: Ein USB-C-Messgerät zwischen Ladekabel und Headset stecken, mindestens 20 % laden und die angezeigten mAh beim Ladevorgang eintragen. ChatMix rechnet auf 100 % hoch und berücksichtigt rund 15 % Ladeverluste. Mehrere Messungen über Monate zeigen, wie der Akku altert.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section {
+                Button("Verlauf löschen", role: .destructive) { tracker.clearHistory() }
+            }
+        }
+        .formStyle(.grouped)
+    }
+}
+
+struct SessionRow: View {
+    let session: ChargeSession
+    @ObservedObject var tracker: BatteryTracker
+
+    var body: some View {
+        let s = session
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(s.start.formatted(date: .abbreviated, time: .shortened))
+                Spacer()
+                Text("\(s.startPct) % → \(s.endPct) %").monospacedDigit()
+                if s.end == nil {
+                    Text("lädt").font(.caption).foregroundStyle(.green)
+                } else if let end = s.end {
+                    Text("\(Int(end.timeIntervalSince(s.start) / 60)) Min.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            HStack {
+                if s.end != nil && s.endPct < 95 {
+                    Text("Ladeende unter 100 % (abgezogen oder vom Headset gestoppt)")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                TextField("mAh", value: Binding(
+                    get: { s.measuredMAh ?? 0 },
+                    set: { tracker.setMeasuredMAh($0 > 0 ? $0 : nil, for: s.id) }),
+                    format: .number)
+                    .frame(width: 70)
+                    .multilineTextAlignment(.trailing)
+                Text("mAh").font(.caption).foregroundStyle(.secondary)
+                if let cap = s.capacityEstimate {
+                    Text("→ \(Int(cap.rounded())) mAh voll").font(.caption).bold()
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Menüleiste
 
 struct MenuContent: View {
@@ -886,8 +1394,9 @@ struct MenuContent: View {
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
-        Text(model.connected ? "Headset verbunden" : "Headset nicht verbunden")
+        Text(model.connected ? "Headset verbunden (\(model.connectionType))" : "Headset nicht verbunden")
         if model.connected {
+            if let bt = model.batteryText { Text(bt) }
             Text("Game \(model.game) %  ·  Chat \(model.chat) %")
         }
         if let err = model.errorText {
@@ -916,10 +1425,12 @@ struct SettingsView: View {
                 .tabItem { Label("Allgemein", systemImage: "gearshape") }
             ChannelSettings(model: model)
                 .tabItem { Label("Kanäle", systemImage: "slider.horizontal.3") }
+            BatterySettings(model: model, tracker: model.batteryTracker)
+                .tabItem { Label("Akku", systemImage: "battery.75") }
             AboutSettings()
                 .tabItem { Label("Info", systemImage: "info.circle") }
         }
-        .frame(width: 560, height: 620)
+        .frame(width: 580, height: 680)
     }
 }
 
@@ -955,9 +1466,20 @@ struct GeneralSettings: View {
         Form {
             Section("Status") {
                 LabeledContent("Headset") {
-                    Label(model.connected ? "Verbunden" : "Nicht verbunden",
+                    Label(model.connected ? "Verbunden über \(model.connectionType)" : "Nicht verbunden",
                           systemImage: model.connected ? "checkmark.circle.fill" : "xmark.circle")
                         .foregroundStyle(model.connected ? .green : .secondary)
+                }
+                if model.connected {
+                    if model.headsetOn == false {
+                        LabeledContent("Akku") { Text("Headset ausgeschaltet").foregroundStyle(.secondary) }
+                    } else if let b = model.battery {
+                        LevelRow(title: model.charging ? "Akku (lädt)" : "Akku",
+                                 symbol: model.charging ? "battery.100.bolt"
+                                     : b > 60 ? "battery.75" : b > 25 ? "battery.50" : "battery.25",
+                                 value: Double(b) / 100,
+                                 tint: b > 20 ? .green : .red)
+                    }
                 }
                 if let err = model.errorText {
                     Label(err, systemImage: "exclamationmark.triangle.fill")
