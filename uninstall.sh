@@ -15,6 +15,7 @@ done
 
 defaults delete "$BUNDLE_ID" >/dev/null 2>&1 || true
 tccutil reset AudioCapture "$BUNDLE_ID" >/dev/null 2>&1 || true
+tccutil reset Accessibility "$BUNDLE_ID" >/dev/null 2>&1 || true
 
 echo "✅ ChatMix wurde entfernt (inkl. Einstellungen und Berechtigung)."
 echo "   Falls du „Beim Anmelden starten“ aktiviert hattest, verschwindet der Eintrag nach dem nächsten Neustart."

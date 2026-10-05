@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.4 – 2026-10-05
+
+### Added
+- Headset power button works as a media key on the Mac: press 1× for play/pause, 2× for next, 3× for previous track. Can be switched off in the settings and needs the Accessibility permission once (granted again after every update)
+
 ## 1.3.1 – 2026-10-04
 
 First public release.

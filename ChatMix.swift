@@ -518,9 +518,13 @@ final class DialReader {
         var charging = false
     }
 
+    enum MediaButton { case playPause, next, previous }
+
     var onValues: ((Int, Int) -> Void)?
     var onConnectionChange: ((Bool) -> Void)?
     var onStatus: ((Status) -> Void)?
+    /// Power-Taste am Headset: 1×, 2×, 3× drücken
+    var onMediaButton: ((MediaButton) -> Void)?
     private(set) var status = Status()
     /// Schnittstelle für Statusabfragen (Usage Page 0xffc0, Interface 3)
     private var commandDevices: [IOHIDDevice] = []
@@ -545,7 +549,9 @@ final class DialReader {
         // Befehls-Schnittstelle nur am Dongle: Das per USB-C-Kabel angeschlossene Headset (0x227c)
         // hat zwar auch eine, beantwortet aber keine Statusabfragen.
         var cmdByID = byID; cmdByID[kIOHIDPrimaryUsagePageKey] = 0xffc0
-        IOHIDManagerSetDeviceMatchingMultiple(manager, [byID, byName, cmdByID] as CFArray)
+        // Medientasten-Schnittstelle des Dongles (Consumer Control, Interface 4)
+        var mediaByID = byID; mediaByID[kIOHIDPrimaryUsagePageKey] = 0x000c
+        IOHIDManagerSetDeviceMatchingMultiple(manager, [byID, byName, cmdByID, mediaByID] as CFArray)
         let ctx = Unmanaged.passUnretained(self).toOpaque()
 
         IOHIDManagerRegisterDeviceMatchingCallback(manager, { ctx, _, _, device in
@@ -556,10 +562,17 @@ final class DialReader {
             guard let ctx else { return }
             Unmanaged<DialReader>.fromOpaque(ctx).takeUnretainedValue().changed(-1, device)
         }, ctx)
-        IOHIDManagerRegisterInputReportCallback(manager, { ctx, _, _, _, reportID, report, length in
+        IOHIDManagerRegisterInputReportCallback(manager, { ctx, _, sender, _, reportID, report, length in
             guard let ctx else { return }
-            Unmanaged<DialReader>.fromOpaque(ctx).takeUnretainedValue()
-                .handle(reportID: reportID, report: report, length: Int(length))
+            let reader = Unmanaged<DialReader>.fromOpaque(ctx).takeUnretainedValue()
+            if let sender {
+                let device = Unmanaged<IOHIDDevice>.fromOpaque(sender).takeUnretainedValue()
+                if reader.usagePage(device) == 0x000c {
+                    reader.handleMedia(reportID: reportID, report: report, length: Int(length))
+                    return
+                }
+            }
+            reader.handle(reportID: reportID, report: report, length: Int(length))
         }, ctx)
 
         IOHIDManagerScheduleWithRunLoop(manager, CFRunLoopGetMain(), CFRunLoopMode.defaultMode.rawValue)
@@ -580,11 +593,12 @@ final class DialReader {
         }
     }
 
-    private func usagePage(_ device: IOHIDDevice) -> Int {
+    fileprivate func usagePage(_ device: IOHIDDevice) -> Int {
         (IOHIDDeviceGetProperty(device, kIOHIDPrimaryUsagePageKey as CFString) as? Int) ?? 0
     }
 
     private func changed(_ delta: Int, _ device: IOHIDDevice) {
+        if usagePage(device) == 0x000c { return }
         if usagePage(device) == 0xffc0 {
             if delta > 0 {
                 commandDevices.append(device)
@@ -611,7 +625,27 @@ final class DialReader {
         if was != (connected > 0) || delta != 0 { onConnectionChange?(connected > 0) }
     }
 
-    private func handle(reportID: UInt32, report: UnsafeMutablePointer<UInt8>, length: Int) {
+    private var lastMediaPress = Date.distantPast
+
+    fileprivate func handleMedia(reportID: UInt32, report: UnsafeMutablePointer<UInt8>, length: Int) {
+        let start = reportID != 0 ? 1 : 0          // Report-ID-Byte überspringen, falls vorhanden
+        guard length > start else { return }
+        var mask: UInt8 = 0
+        for i in start..<length where report[i] != 0 { mask = report[i]; break }
+        let button: MediaButton
+        switch mask {
+        case 0x02: button = .playPause
+        case 0x04: button = .next
+        case 0x01: button = .previous
+        default: return                           // 00 = Taste losgelassen
+        }
+        let now = Date()
+        guard now.timeIntervalSince(lastMediaPress) > 0.15 else { return }
+        lastMediaPress = now
+        onMediaButton?(button)
+    }
+
+    fileprivate func handle(reportID: UInt32, report: UnsafeMutablePointer<UInt8>, length: Int) {
         if length >= 2 {
             var s = status
             switch report[0] {
@@ -711,6 +745,18 @@ func menuBarIcon(game: Int, chat: Int, connected: Bool, showPercent: Bool) -> NS
     return img
 }
 
+/// Schickt eine Medientaste (Play/Pause, Weiter, Zurück) an macOS – wie die Tasten F7–F9.
+func postMediaKey(_ key: Int) {
+    for down in [true, false] {
+        let flags = NSEvent.ModifierFlags(rawValue: down ? 0xa00 : 0xb00)
+        let data1 = (key << 16) | ((down ? 0xa : 0xb) << 8)
+        let event = NSEvent.otherEvent(with: .systemDefined, location: .zero, modifierFlags: flags,
+                                       timestamp: 0, windowNumber: 0, context: nil,
+                                       subtype: 8, data1: data1, data2: -1)
+        event?.cgEvent?.post(tap: .cghidEventTap)
+    }
+}
+
 final class AppModel: ObservableObject {
     static let shared = AppModel()
 
@@ -772,6 +818,13 @@ final class AppModel: ObservableObject {
     @Published var apps: [AppEntry] = []
     @Published var launchAtLogin = SMAppService.mainApp.status == .enabled
     @Published var loginError: String?
+    /// Power-Taste des Headsets als Medientaste (1× Play/Pause, 2× Weiter, 3× Zurück)
+    @Published var mediaKeysEnabled: Bool {
+        didSet { UserDefaults.standard.set(mediaKeysEnabled, forKey: "mediaKeys") }
+    }
+    /// Freigabe unter Bedienungshilfen (nötig, um Medientasten an macOS zu schicken)
+    @Published var accessibilityTrusted = AXIsProcessTrusted()
+    private var tickCount = 0
 
     private var extraApps: [String]
     private var timer: Timer?
@@ -780,6 +833,7 @@ final class AppModel: ObservableObject {
         let d = UserDefaults.standard
         curve = GainCurve(rawValue: d.integer(forKey: "curve")) ?? .natural
         showPercent = (d.object(forKey: "showPercent") as? Bool) ?? true
+        mediaKeysEnabled = (d.object(forKey: "mediaKeys") as? Bool) ?? true
         extraApps = d.stringArray(forKey: "extraApps") ?? []
         gamesChannel = Channel(rawValue: (d.object(forKey: "gamesChannel") as? Int) ?? 0) ?? .game
         otherChannel = Channel(rawValue: (d.object(forKey: "otherChannel") as? Int) ?? 0) ?? .game
@@ -848,6 +902,15 @@ final class AppModel: ObservableObject {
                 self.applyGains()
             }
         }
+        dial.onMediaButton = { [weak self] button in
+            guard let self, self.mediaKeysEnabled else { return }
+            self.accessibilityTrusted = AXIsProcessTrusted()
+            switch button {
+            case .playPause: postMediaKey(16)     // NX_KEYTYPE_PLAY
+            case .next: postMediaKey(17)          // NX_KEYTYPE_NEXT
+            case .previous: postMediaKey(18)      // NX_KEYTYPE_PREVIOUS
+            }
+        }
         dial.onStatus = { [weak self] st in
             guard let self else { return }
             self.headsetOn = st.headsetOn
@@ -876,6 +939,11 @@ final class AppModel: ObservableObject {
     }
 
     private func tick() {
+        tickCount += 1
+        if tickCount % 20 == 0 {
+            let trusted = AXIsProcessTrusted()
+            if trusted != accessibilityTrusted { accessibilityTrusted = trusted }
+        }
         if errorText != router.lastError { errorText = router.lastError }
         let lv = router.takeLevels()
         // Spitzenwert mit sanftem Abfall, damit die Balken ruhig wirken
@@ -980,6 +1048,15 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(extraApps, forKey: "extraApps")
         overrides[app.id] = nil
         refreshApps()
+    }
+
+    func requestAccessibility() {
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        accessibilityTrusted = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
+        if !accessibilityTrusted,
+           let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     func setLaunchAtLogin(_ on: Bool) {
@@ -1507,6 +1584,17 @@ struct GeneralSettings: View {
                     Text("Linear").tag(GainCurve.linear)
                 }
                 Toggle("Prozentwerte in der Menüleiste anzeigen", isOn: $model.showPercent)
+                Toggle("Power-Taste als Medientaste (1× Play/Pause, 2× Weiter, 3× Zurück)",
+                       isOn: $model.mediaKeysEnabled)
+                if model.mediaKeysEnabled && !model.accessibilityTrusted {
+                    HStack {
+                        Label("Dafür braucht ChatMix eine Freigabe unter Bedienungshilfen.",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Spacer()
+                        Button("Freigeben …") { model.requestAccessibility() }
+                    }
+                }
                 Toggle("Beim Anmelden starten", isOn: Binding(
                     get: { model.launchAtLogin },
                     set: { model.setLaunchAtLogin($0) }))

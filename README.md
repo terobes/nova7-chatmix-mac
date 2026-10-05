@@ -14,6 +14,7 @@ The ChatMix dial on the Arctis Nova 7 Gen 2 only works on Windows, because it re
 
 - Reads the ChatMix dial position directly via USB HID, no SteelSeries software needed
 - Shows the headset battery level and charging state in the menu and settings
+- Makes the headset's power-button media functions work on the Mac: press 1× for play/pause, 2× for next, 3× for previous track (needs the Accessibility permission)
 - Battery tab: history chart, estimated runtime and charge time, charge-limit notification (optionally runs a Shortcut, e.g. to switch off a smart plug), low-battery warning, detection of charging that stalls below 100 %, and capacity estimation in mAh with a USB-C power meter
 - Per-app routing with three channels: **Game**, **Chat** or **Normal** (untouched by the dial)
 - Automatic game detection: Steam library, CrossOver / Whisky / Wine, GeForce NOW and the macOS app category "Games"
@@ -56,7 +57,7 @@ bash install.sh
 - Turn towards one side: the other side gets quieter, down to silent
 - Menu bar: shows a game controller and a chat bubble separated by "|". The quieter side fades out as you turn the dial; the percentages can be hidden in the settings
 - **Settings** (menu bar icon › *Einstellungen …* or ⌘,):
-  - **Allgemein (General):** status, live bars for dial position and signal levels, volume curve, percentages in the menu bar, launch at login
+  - **Allgemein (General):** status, live bars for dial position and signal levels, volume curve, percentages in the menu bar, power button as media key, launch at login
   - **Kanäle (Channels):** defaults for games, other apps and system sounds, plus a **Game | Chat | Normal** switch for every app. Installed games are listed automatically; other apps appear when they play audio, or add them with *App hinzufügen …*. A separate switch covers iPhone calls and FaceTime audio. Right-click an app to reset it to the default.
   - **Akku (Battery):** live level, history chart (24 h / 7 days / 30 days), estimated runtime and time to full, charge limit with notification and optional Shortcut, low-battery warning, list of charging sessions. Enter the mAh shown by a USB-C power meter for a session (at least 20 % charged) and ChatMix estimates the full capacity, allowing ~15 % charging losses.
   - **Info:** version and project notes
@@ -91,6 +92,8 @@ In the centre position both values are 100. Polling (as done by HeadsetControl f
 | 2 | Battery in % |
 | 3 | `0x01` = charging |
 
+**Media buttons.** The power button on the headset sends consumer-control reports on interface 4 (`usage page 0x000c`), which macOS ignores: `02` = pressed once, `04` = twice, `01` = three times, `00` = released. ChatMix translates them into the system play/pause, next and previous keys.
+
 Changes are also reported unprompted on interface 5: `b7 <battery %>`, `bb <01 = charging>`, `b9 <03 = headset on>`. Thanks to the Linux kernel `hid-steelseries` work for documenting this.
 
 ## Troubleshooting
@@ -99,6 +102,7 @@ Changes are also reported unprompted on interface 5: `b7 <battery %>`, `bb <01 =
 |---|---|
 | `install.sh` reports missing Command Line Tools | Finish the installation dialog, then run `bash install.sh` again |
 | Menu shows "Headset nicht verbunden" | Plug the dongle in directly (not via an unpowered hub), switch the headset on |
+| Power button does nothing | Settings › Allgemein: enable the media-key option and click *Freigeben …* (Accessibility). After every update the permission has to be granted again |
 | Settings show a permission warning | Check *Screen & System Audio Recording* in System Settings, then restart ChatMix |
 | Permission asked again after an update | Expected: the app is ad-hoc signed, every build counts as a new app. Just allow it again |
 | A chat app is not affected by the dial | Settings › Kanäle: set it to "Chat", or add it with "App hinzufügen …" |
@@ -164,7 +168,7 @@ bash install.sh
 - Zur einen Seite drehen: die andere Seite wird leiser, bis stumm
 - Menüleiste: zeigt Controller und Sprechblase, getrennt durch „|“. Die leisere Seite wird beim Drehen blasser; die Prozentwerte lassen sich in den Einstellungen ausblenden
 - **Einstellungen** (Menüleisten-Symbol › *Einstellungen …* oder ⌘,):
-  - **Allgemein:** Status, Live-Balken für Radstellung und Signal, Lautstärkeverlauf, Prozentwerte in der Menüleiste, Start bei der Anmeldung
+  - **Allgemein:** Status, Live-Balken für Radstellung und Signal, Lautstärkeverlauf, Prozentwerte in der Menüleiste, Power-Taste als Medientaste (1× Play/Pause, 2× Weiter, 3× Zurück – braucht die Freigabe unter Bedienungshilfen), Start bei der Anmeldung
   - **Kanäle:** Standardregeln für Spiele, andere Apps und Systemklänge sowie ein Umschalter **Game | Chat | Normal** für jede App. „Normal“ heißt: Das Rad wirkt nicht darauf. Installierte Spiele (Steam, CrossOver/Whisky, Kategorie „Games“) werden automatisch erkannt; andere Apps erscheinen, sobald sie Ton abspielen, oder über *App hinzufügen …*. Ein eigener Schalter regelt Anrufe vom iPhone und FaceTime-Audio. Rechtsklick setzt eine App auf den Standard zurück.
   - **Akku:** aktueller Stand, Verlaufsdiagramm (24 Std. / 7 Tage / 30 Tage), geschätzte Laufzeit und Ladedauer, Ladegrenze mit Mitteilung und optionalem Kurzbefehl (z. B. HomeKit-Steckdose aus), Warnung bei 15 %, Liste der Ladevorgänge. Trägst du die mAh eines USB-C-Messgeräts bei einem Ladevorgang ein (mind. 20 % geladen), schätzt ChatMix die volle Kapazität (inkl. ca. 15 % Ladeverlust).
   - **Info:** Version und Hinweise
@@ -176,6 +180,7 @@ bash install.sh
 |---|---|
 | `install.sh` meldet fehlende Command Line Tools | Installationsdialog abschließen, dann `bash install.sh` erneut ausführen |
 | Menü zeigt „Headset nicht verbunden“ | Dongle direkt anstecken, Headset einschalten |
+| Power-Taste macht nichts | Einstellungen › Allgemein: Medientasten-Option an und auf *Freigeben …* klicken (Bedienungshilfen). Nach jedem Update erneut freigeben |
 | Menü zeigt eine Warnung zur Berechtigung | *Bildschirm- & Systemaudioaufnahme* prüfen, ChatMix neu starten |
 | Nach einem Update wird erneut nach der Berechtigung gefragt | Normal: Jeder Build gilt als neue App. Einfach wieder erlauben |
 | Eine Chat-App reagiert nicht aufs Rad | Einstellungen › Kanäle: auf „Chat“ stellen oder über „App hinzufügen …“ ergänzen |

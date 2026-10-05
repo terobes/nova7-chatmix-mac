@@ -49,6 +49,7 @@ xattr -dr com.apple.quarantine "$DEST/$APP_NAME" 2>/dev/null || true
 
 # 5. Audio-Berechtigung zurücksetzen, damit macOS für den neuen Build sauber fragt
 tccutil reset AudioCapture "$BUNDLE_ID" >/dev/null 2>&1 || true
+tccutil reset Accessibility "$BUNDLE_ID" >/dev/null 2>&1 || true
 
 # 6. Starten
 open "$DEST/$APP_NAME"
@@ -57,4 +58,5 @@ echo ""
 echo "✅ ChatMix ist installiert: $DEST/$APP_NAME"
 echo "   Das Symbol erscheint oben in der Menüleiste."
 echo "   Wenn macOS fragt, ob ChatMix Systemaudio aufnehmen darf: bitte erlauben."
+echo "   Für die Medientasten am Headset: Einstellungen › Allgemein › „Freigeben …“."
 echo "   Den heruntergeladenen Ordner kannst du jetzt löschen."
